@@ -1,0 +1,110 @@
+name: Build TALMA Power Apps CLEAN v2
+
+on:
+  push:
+    branches:
+      - talma-powerapps-build
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Power Platform CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet tool install --global Microsoft.PowerApps.CLI.Tool
+          "$HOME/.dotnet/tools/pac" help >/dev/null
+
+      - name: Prepare clean modern baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRCROOT="$RUNNER_TEMP/talma-src"
+          MSAPRROOT="$RUNNER_TEMP/msapr"
+          mkdir -p "$SRCROOT" "$MSAPRROOT"
+          curl -L --fail --silent --show-error \
+            https://raw.githubusercontent.com/gabrielndluna/power-apps-ai-skills/master/Dayaway_YNSE/_pack_check/app.msapr \
+            -o "$RUNNER_TEMP/original.msapr"
+          unzip -q "$RUNNER_TEMP/original.msapr" -d "$MSAPRROOT"
+
+          python - <<'PY'
+          import json, pathlib
+          root = pathlib.Path("${{ runner.temp }}") / "msapr" / "msapp"
+          ds_path = root / "References" / "DataSources.json"
+          ds = json.loads(ds_path.read_text(encoding="utf-8-sig"))
+          # Keep only harmless built-in sample/static metadata. Remove all external/connected data sources.
+          ds["DataSources"] = [d for d in ds.get("DataSources", []) if d.get("Type") == "StaticDataSourceInfo"]
+          ds_path.write_text(json.dumps(ds, indent=2), encoding="utf-8")
+
+          props_path = root / "Properties.json"
+          props = json.loads(props_path.read_text(encoding="utf-8-sig"))
+          props["LocalConnectionReferences"] = "{}"
+          props["LocalDatabaseReferences"] = ""
+          props["ConnectionString"] = ""
+          props_path.write_text(json.dumps(props, indent=2), encoding="utf-8")
+
+          qv_path = root / "References" / "QualifiedValues.json"
+          if qv_path.exists():
+              qv = json.loads(qv_path.read_text(encoding="utf-8-sig"))
+              qv["QualifiedValues"] = []
+              qv_path.write_text(json.dumps(qv, indent=2), encoding="utf-8")
+          PY
+
+          (cd "$MSAPRROOT" && zip -qr "$SRCROOT/app.msapr" .)
+          unzip -t "$SRCROOT/app.msapr"
+
+          base64 -d "$GITHUB_WORKSPACE/talma_payload2.b64" > "$RUNNER_TEMP/talma_payload.zip"
+          unzip -q "$RUNNER_TEMP/talma_payload.zip" -d "$SRCROOT"
+          test -s "$SRCROOT/Src/App.pa.yaml"
+          test -s "$SRCROOT/Src/Approvals.pa.yaml"
+          test -s "$SRCROOT/Src/Vacations Tracking.pa.yaml"
+
+      - name: Pack real msapp with official PAC CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          PAC="$HOME/.dotnet/tools/pac"
+          SRCROOT="$RUNNER_TEMP/talma-src"
+          OUT="$GITHUB_WORKSPACE/TALMA_Registro_Equipajes_CLEAN.msapp"
+          "$PAC" canvas pack --sources "$SRCROOT" --msapp "$OUT" --layout SourceCode --overwrite
+          test -s "$OUT"
+          unzip -t "$OUT"
+          unzip -l "$OUT" | tee msapp-files.txt
+          unzip -p "$OUT" 'Src/App.pa.yaml' | grep -F 'StartScreen: =Approvals'
+
+          python - <<'PY'
+          import zipfile, json, sys
+          p='TALMA_Registro_Equipajes_CLEAN.msapp'
+          with zipfile.ZipFile(p) as z:
+              props=json.loads(z.read('Properties.json'))
+              ds=json.loads(z.read('References/DataSources.json'))
+              external=[d for d in ds.get('DataSources',[]) if d.get('Type') in ('ServiceInfo','ConnectedDataSourceInfo')]
+              print('ParserErrorCount=', props.get('ParserErrorCount'))
+              print('BindingErrorCount=', props.get('BindingErrorCount'))
+              print('LocalConnectionReferences=', props.get('LocalConnectionReferences'))
+              print('ExternalDataSources=', [(d.get('Type'),d.get('Name')) for d in external])
+              if props.get('ParserErrorCount',0) != 0 or props.get('BindingErrorCount',0) != 0:
+                  sys.exit('Parser or binding errors found')
+              if props.get('LocalConnectionReferences') not in ('{}',''):
+                  sys.exit('Unexpected connection references')
+              if external:
+                  sys.exit('Unexpected external data sources')
+          PY
+
+      - name: Upload compiled clean app
+        uses: actions/upload-artifact@v4
+        with:
+          name: TALMA_Registro_Equipajes_CLEAN_v2
+          path: |
+            TALMA_Registro_Equipajes_CLEAN.msapp
+            msapp-files.txt
+          if-no-files-found: error
