@@ -1,0 +1,60 @@
+name: Build TALMA Power Apps
+
+on:
+  push:
+    branches:
+      - talma-powerapps-build
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare valid SourceCode baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/gabrielndluna/power-apps-ai-skills.git /tmp/powerapps-base
+          cp -a /tmp/powerapps-base/Dayaway_YNSE/_pack_check "$RUNNER_TEMP/talma-src"
+          rm -rf "$RUNNER_TEMP/talma-src/Src"
+          cat > "$RUNNER_TEMP/talma-src.zip.b64" <<'PAYLOAD'
+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
+PAYLOAD
+          base64 -d "$RUNNER_TEMP/talma-src.zip.b64" > "$RUNNER_TEMP/talma-src.zip"
+          unzip -q "$RUNNER_TEMP/talma-src.zip" -d "$RUNNER_TEMP/talma-src"
+          find "$RUNNER_TEMP/talma-src/Src" -maxdepth 1 -type f -print
+
+      - name: Install Power Platform CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet tool install --global Microsoft.PowerApps.CLI.Tool
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+          "$HOME/.dotnet/tools/pac" help >/dev/null
+
+      - name: Pack real msapp
+        shell: bash
+        run: |
+          set -euo pipefail
+          PAC="$HOME/.dotnet/tools/pac"
+          "$PAC" canvas pack --sources "$RUNNER_TEMP/talma-src" --msapp "$GITHUB_WORKSPACE/TALMA_Registro_Equipajes.msapp" --layout SourceCode --overwrite
+          test -s "$GITHUB_WORKSPACE/TALMA_Registro_Equipajes.msapp"
+          unzip -t "$GITHUB_WORKSPACE/TALMA_Registro_Equipajes.msapp"
+          unzip -l "$GITHUB_WORKSPACE/TALMA_Registro_Equipajes.msapp" | tee msapp-files.txt
+          unzip -p "$GITHUB_WORKSPACE/TALMA_Registro_Equipajes.msapp" 'Src/App.pa.yaml' | grep -F 'StartScreen: =Approvals'
+
+      - name: Upload compiled app
+        uses: actions/upload-artifact@v4
+        with:
+          name: TALMA_Registro_Equipajes
+          path: |
+            TALMA_Registro_Equipajes.msapp
+            msapp-files.txt
+          if-no-files-found: error
