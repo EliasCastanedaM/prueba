@@ -17,20 +17,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare SourceCode baseline and TALMA source
-        shell: bash
-        run: |
-          set -euo pipefail
-          git clone --depth 1 https://github.com/gabrielndluna/power-apps-ai-skills.git /tmp/powerapps-base
-          cp -a /tmp/powerapps-base/Dayaway_YNSE/_pack_check "$RUNNER_TEMP/talma-src"
-          rm -rf "$RUNNER_TEMP/talma-src/Src"
-          base64 -d "$GITHUB_WORKSPACE/talma_payload.b64" > "$RUNNER_TEMP/talma_payload.zip"
-          unzip -q "$RUNNER_TEMP/talma_payload.zip" -d "$RUNNER_TEMP/talma-src"
-          test -s "$RUNNER_TEMP/talma-src/app.msapr"
-          test -s "$RUNNER_TEMP/talma-src/Src/App.pa.yaml"
-          test -s "$RUNNER_TEMP/talma-src/Src/Approvals.pa.yaml"
-          find "$RUNNER_TEMP/talma-src/Src" -maxdepth 1 -type f -print
-
       - name: Install Power Platform CLI
         shell: bash
         run: |
@@ -38,21 +24,46 @@ jobs:
           dotnet tool install --global Microsoft.PowerApps.CLI.Tool
           "$HOME/.dotnet/tools/pac" help >/dev/null
 
+      - name: Unpack connector-free baseline and inject TALMA source
+        shell: bash
+        run: |
+          set -euo pipefail
+          PAC="$HOME/.dotnet/tools/pac"
+          BASELINE="$RUNNER_TEMP/baseline.msapp"
+          SRCROOT="$RUNNER_TEMP/talma-src"
+          curl -L --fail --silent --show-error \
+            https://raw.githubusercontent.com/pnp/powerapps-samples/main/samples/expandable-navigation/solution/expandable-navigation.msapp \
+            -o "$BASELINE"
+          test -s "$BASELINE"
+          "$PAC" canvas unpack --msapp "$BASELINE" --sources "$SRCROOT" --layout SourceCode
+          test -n "$(find "$SRCROOT" -maxdepth 1 -type f -name '*.msapr' -print -quit)"
+          rm -rf "$SRCROOT/Src"
+          base64 -d "$GITHUB_WORKSPACE/talma_payload.b64" > "$RUNNER_TEMP/talma_payload.zip"
+          unzip -q "$RUNNER_TEMP/talma_payload.zip" -d "$SRCROOT"
+          test -s "$SRCROOT/Src/App.pa.yaml"
+          test -s "$SRCROOT/Src/Welcome Screen.pa.yaml"
+          find "$SRCROOT/Src" -maxdepth 1 -type f -print | sort
+
       - name: Pack real msapp
         shell: bash
         run: |
           set -euo pipefail
           PAC="$HOME/.dotnet/tools/pac"
-          "$PAC" canvas pack --sources "$RUNNER_TEMP/talma-src" --msapp "$GITHUB_WORKSPACE/TALMA_Registro_Equipajes.msapp" --layout SourceCode --overwrite
+          SRCROOT="$RUNNER_TEMP/talma-src"
+          "$PAC" canvas pack --sources "$SRCROOT" --msapp "$GITHUB_WORKSPACE/TALMA_Registro_Equipajes.msapp" --layout SourceCode --overwrite
           test -s "$GITHUB_WORKSPACE/TALMA_Registro_Equipajes.msapp"
           unzip -t "$GITHUB_WORKSPACE/TALMA_Registro_Equipajes.msapp"
           unzip -l "$GITHUB_WORKSPACE/TALMA_Registro_Equipajes.msapp" | tee msapp-files.txt
-          unzip -p "$GITHUB_WORKSPACE/TALMA_Registro_Equipajes.msapp" 'Src/App.pa.yaml' | grep -F 'StartScreen: =Approvals'
+          unzip -p "$GITHUB_WORKSPACE/TALMA_Registro_Equipajes.msapp" 'Src/App.pa.yaml' | grep -F "StartScreen: ='Welcome Screen'"
+          if unzip -p "$GITHUB_WORKSPACE/TALMA_Registro_Equipajes.msapp" References/DataSources.json | grep -Eqi 'sharepoint|office365|excelonline|neconnectors'; then
+            echo 'Unexpected external connector reference in package' >&2
+            exit 1
+          fi
 
       - name: Upload compiled app
         uses: actions/upload-artifact@v4
         with:
-          name: TALMA_Registro_Equipajes
+          name: TALMA_Registro_Equipajes_CLEAN
           path: |
             TALMA_Registro_Equipajes.msapp
             msapp-files.txt
