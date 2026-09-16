@@ -1,0 +1,150 @@
+name: Build TALMA Power Apps v3
+
+on:
+  push:
+    branches:
+      - talma-powerapps-build
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Power Platform CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet tool install --global Microsoft.PowerApps.CLI.Tool
+          "$HOME/.dotnet/tools/pac" help >/dev/null
+
+      - name: Prepare clean baseline and TALMA source
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRCROOT="$RUNNER_TEMP/talma-v3-src"
+          mkdir -p "$SRCROOT"
+
+          curl -L --fail --silent --show-error \
+            https://raw.githubusercontent.com/gabrielndluna/power-apps-ai-skills/master/Dayaway_YNSE/_pack_check/app.msapr \
+            -o "$RUNNER_TEMP/original.msapr"
+
+          python - <<'PY'
+          import zipfile, json, pathlib, base64
+          src = pathlib.Path('/home/runner/work/_temp/original.msapr')
+          out = pathlib.Path('/home/runner/work/_temp/talma-v3-src/app.msapr')
+          entries = {}
+          with zipfile.ZipFile(src, 'r') as zin:
+              for info in zin.infolist():
+                  name = info.filename.replace('\\', '/')
+                  if name.endswith('/'):
+                      continue
+                  entries[name] = zin.read(info)
+
+          def load_json(path):
+              return json.loads(entries[path].decode('utf-8-sig'))
+          def save_json(path, obj):
+              entries[path] = json.dumps(obj, ensure_ascii=False, indent=2).encode('utf-8')
+
+          props_path = 'msapp/Properties.json'
+          props = load_json(props_path)
+          props['Name'] = base64.b64encode('TALMA - Registro de Equipajes'.encode('utf-8')).decode('ascii') + '.msapp'
+          props['LocalConnectionReferences'] = '{}'
+          props['LocalDatabaseReferences'] = ''
+          props['ConnectionString'] = ''
+          save_json(props_path, props)
+
+          ds_path = 'msapp/References/DataSources.json'
+          save_json(ds_path, {'DataSources': []})
+
+          qv_path = 'msapp/References/QualifiedValues.json'
+          if qv_path in entries:
+              qv = load_json(qv_path)
+              qv['QualifiedValues'] = []
+              save_json(qv_path, qv)
+
+          with zipfile.ZipFile(out, 'w', compression=zipfile.ZIP_DEFLATED) as zout:
+              for name, data in entries.items():
+                  zout.writestr(name, data)
+          print('clean msapr written:', out, out.stat().st_size)
+          PY
+
+          unzip -t "$SRCROOT/app.msapr"
+          base64 -d "$GITHUB_WORKSPACE/talma_v3_payload.b64" > "$RUNNER_TEMP/talma_v3_payload.zip"
+          unzip -q "$RUNNER_TEMP/talma_v3_payload.zip" -d "$SRCROOT"
+          test -s "$SRCROOT/Src/App.pa.yaml"
+          test -s "$SRCROOT/Src/Identificacion.pa.yaml"
+          test -s "$SRCROOT/Src/RegistroVuelo.pa.yaml"
+          test -s "$SRCROOT/Src/OperacionEquipaje.pa.yaml"
+          test -s "$SRCROOT/Src/CierreRegistro.pa.yaml"
+          find "$SRCROOT" -maxdepth 2 -type f -print
+
+      - name: Pack real msapp
+        shell: bash
+        run: |
+          set -euo pipefail
+          PAC="$HOME/.dotnet/tools/pac"
+          SRCROOT="$RUNNER_TEMP/talma-v3-src"
+          OUT="$GITHUB_WORKSPACE/TALMA_Registro_Equipajes_v3.msapp"
+          "$PAC" canvas pack --sources "$SRCROOT" --msapp "$OUT" --layout SourceCode --overwrite
+          test -s "$OUT"
+          unzip -t "$OUT"
+          unzip -l "$OUT" | tee msapp-files-v3.txt
+
+          python - <<'PY'
+          import zipfile, json, sys
+          p='TALMA_Registro_Equipajes_v3.msapp'
+          forbidden=['Dayaway','Office365Outlook','Vacations Tracking','excelonlinebusiness','sharepointonline','neconnectors.sharepoint.com']
+          with zipfile.ZipFile(p) as z:
+              names=set(z.namelist())
+              required={
+                  'Src/App.pa.yaml',
+                  'Src/Identificacion.pa.yaml',
+                  'Src/RegistroVuelo.pa.yaml',
+                  'Src/OperacionEquipaje.pa.yaml',
+                  'Src/CierreRegistro.pa.yaml',
+                  'Properties.json',
+                  'References/DataSources.json'
+              }
+              missing=required-names
+              if missing:
+                  sys.exit('Missing expected files: '+repr(missing))
+              props=json.loads(z.read('Properties.json'))
+              ds=json.loads(z.read('References/DataSources.json'))
+              print('Name=',props.get('Name'))
+              print('ParserErrorCount=',props.get('ParserErrorCount'))
+              print('BindingErrorCount=',props.get('BindingErrorCount'))
+              print('LocalConnectionReferences=',props.get('LocalConnectionReferences'))
+              print('DataSourceCount=',len(ds.get('DataSources',[])))
+              if props.get('LocalConnectionReferences') not in ('{}',''):
+                  sys.exit('Unexpected connection references')
+              if ds.get('DataSources'):
+                  sys.exit('Unexpected data sources')
+              for name in names:
+                  if name.endswith(('.json','.yaml','.sarif','.txt')):
+                      try:
+                          text=z.read(name).decode('utf-8','ignore')
+                      except Exception:
+                          continue
+                      for token in forbidden:
+                          if token.lower() in text.lower():
+                              sys.exit(f'Forbidden inherited token {token!r} in {name}')
+              app=z.read('Src/App.pa.yaml').decode('utf-8')
+              if 'StartScreen: =Identificacion' not in app:
+                  sys.exit('Unexpected start screen')
+          PY
+
+      - name: Upload compiled app
+        uses: actions/upload-artifact@v4
+        with:
+          name: TALMA_Registro_Equipajes_v3
+          path: |
+            TALMA_Registro_Equipajes_v3.msapp
+            msapp-files-v3.txt
+          if-no-files-found: error
